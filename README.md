@@ -184,11 +184,15 @@ InterTreeSeg is **dual-licensed**:
 
 ### Patent Notice
 
-The methods implemented here are covered by one or more **patents and/or pending
-patent applications**. **All patent rights are expressly reserved.** Distribution
-under the AGPL-3.0 conveys only the patent rights granted by AGPL-3.0 §11 to
-recipients of the AGPL-licensed work — no other patent license, express or
-implied, is granted. Commercial or proprietary use of the patented methods
+The methods implemented here are covered by a patent application held by
+**East China Normal University**:
+
+- Application No. **CN202510762230.X** (published 2025-10-03)
+
+**All patent rights are expressly reserved.** Distribution under the AGPL-3.0
+conveys only the patent rights granted by AGPL-3.0 §11 to recipients of the
+AGPL-licensed work — no other patent license, express or implied, by estoppel or
+otherwise, is granted. Commercial or proprietary use of the patented methods
 requires a separate license.
 
 ### Third-party code
@@ -196,4 +200,8 @@ requires a separate license.
 This project incorporates Point Transformer V3 (MIT, © 2023 Pointcept). See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Copyright © 2026 `<COPYRIGHT HOLDER>`. <!-- TODO: fill in before publishing -->
+Copyright © 2026 East China Normal University. All rights reserved.
+
+## 👥 Authors
+
+Jun Li, Lanying Wang, Wentao Sun, Hanqing Xu, Lingfei Ma — East China Normal University.

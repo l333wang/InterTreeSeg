@@ -9,7 +9,13 @@ description = "Interactive (click-guided) tree instance segmentation on Point Tr
 readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
-authors = [{ name = "InterTreeSeg contributors" }]
+authors = [
+    { name = "Jun Li" },
+    { name = "Lanying Wang", email = "lanyingwang.bella@gmail.com" },
+    { name = "Wentao Sun" },
+    { name = "Hanqing Xu" },
+    { name = "Lingfei Ma" },
+]
 keywords = ["point-cloud", "instance-segmentation", "forestry", "lidar", "point-transformer"]
 classifiers = [
     "License :: OSI Approved :: GNU Affero General Public License v3",

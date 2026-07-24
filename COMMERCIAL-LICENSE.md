@@ -33,12 +33,14 @@ example, if you want to:
 then you need a **separate commercial license**. Commercial licenses are
 granted on negotiated terms.
 
-**Contact:** `<CONTACT EMAIL>`
+**Contact:** lanyingwang.bella@gmail.com
 
 ## 3. Patent Notice
 
-The methods implemented in this software are covered by one or more **patents
-and/or pending patent applications** held by the copyright holder.
+The methods implemented in this software are covered by a patent application
+held by **East China Normal University**:
+
+- Application No. **CN202510762230.X** (published 2025-10-03)
 
 **All patent rights are expressly reserved.** Distribution of this software
 under the AGPL-3.0 conveys only the patent rights that the AGPL-3.0 itself
@@ -58,7 +60,8 @@ can be included in both the AGPL-3.0 and commercially licensed versions.
 
 ---
 
-> ⚠️ **Placeholders to fill in before publishing:** `<CONTACT EMAIL>` above, and
-> the copyright holder / year in `README.md` and source file headers.
-> This document is a starting template, not legal advice — have your patent
-> attorney or technology-transfer office review the final wording.
+Copyright © 2026 East China Normal University. All rights reserved.
+
+> ⚠️ This document is a starting template, not legal advice — have your patent
+> attorney or technology-transfer office review the final wording before relying
+> on it.
