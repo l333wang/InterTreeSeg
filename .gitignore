@@ -1,0 +1,29 @@
+# Internal, not for public release
+PROVENANCE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+
+# Runs & outputs
+log/
+result/
+*.pth
+*.ckpt
+
+# Data (do not commit datasets / generated blocks)
+data/
+*.h5
+*.ply
+
+# Env / editor
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store

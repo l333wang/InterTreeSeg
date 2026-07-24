@@ -1,0 +1,95 @@
+# InterTreeSeg default config.
+#
+# This config reproduces the released trained checkpoints exactly so they load
+# with strict=True. The backbone values below are the PTv3 *constructor defaults*
+# overridden only by the patch size (512) used to train the checkpoint. Changing
+# any shape-affecting backbone value (e.g. mlp_ratio) will break strict loading of
+# the released weights.
+
+model:
+  num_classes: 2
+  backbone:
+    # in_channels is intentionally ABSENT -- derived from data channel spec by
+    # build_model(). If you pin it here it must equal the derived value.
+    order: [z, z-trans, hilbert, hilbert-trans]
+    stride: [2, 2, 2, 2]
+    enc_depths: [2, 2, 2, 6, 2]
+    enc_channels: [32, 64, 128, 256, 512]
+    enc_num_head: [2, 4, 8, 16, 32]
+    enc_patch_size: [512, 512, 512, 512, 512]     # 512 = value used to TRAIN the checkpoint
+    dec_depths: [2, 2, 2, 2]
+    dec_channels: [64, 64, 128, 256]
+    dec_num_head: [4, 4, 8, 16]
+    dec_patch_size: [512, 512, 512, 512]
+    mlp_ratio: 4          # constructor default -- NOT 3 (3 changes MLP shapes, breaks strict load)
+    qkv_bias: true
+    qk_scale: null
+    attn_drop: 0.0        # constructor default -- NOT 0.3
+    proj_drop: 0.0
+    drop_path: 0.3
+    shuffle_orders: true
+    pre_norm: true
+    enable_rpe: false
+    enable_flash: true
+    upcast_attention: false
+    upcast_softmax: false
+    cls_mode: false
+    pdnorm_bn: false
+    pdnorm_ln: false
+    pdnorm_decouple: true
+    pdnorm_adaptive: false
+    pdnorm_affine: true
+    pdnorm_conditions: [ScanNet, S3DIS, Structured3D]
+
+data:
+  data_dir: data/trees          # legacy relative root; scenes under <data_dir>/<testname>/
+  coord_channels: [0, 1, 2]     # source columns -> xyz
+  feat_channels: []             # extra raw feature source columns -> F=0 -> in_channels = 0 + 2 = 2
+  feat_norm: []                 # one per feat channel: none|standardize|minmax|[scale, s]
+  coord_norm: minmax_block      # per-block, per-axis min-max to [0,1] (checkpoint-faithful)
+  label_channel: 4              # instance-id column in scene txt (legacy one_shot[:, 4])
+  aux_label_channel: 5          # secondary label column (legacy one_shot[:, 5])
+  num_point: 8192               # points per block fed to the network
+  num_sample: 4                 # per-tree sampling repeats when building training blocks
+  block_size: 8192              # scene divided into blocks of this many points (legacy hardcoded 8192)
+  bbox_delta: 0.25              # bbox buffer around a tree (legacy: np.random.uniform(0, 0.5); mean preserved)
+  clicks:
+    n_channels: 2               # pos + neg heatmaps
+    sigma: 0.01                 # Gaussian click falloff
+    pos_max: 16                 # legacy randint(1, pos_max)
+    neg_max: 16                 # legacy randint(0, neg_max)
+    min_obj_points: 100         # min foreground points to keep a training block
+    min_obj_points_infer: 1000  # inference-time object-size threshold
+    coord_space: raw            # clicks computed in raw coordinate space (before coord normalization)
+  augment:
+    enabled: true               # training-time augmentation
+    double: true                # concat an augmented copy (doubles the training set)
+    rot_axis: z                 # rotation axis (z-only, upright trees)
+
+grid_size: 0.02                 # voxelization grid size (legacy default 0.01; run scripts used 0.02)
+batch_size: 60
+epoch: 100
+
+optimizer:
+  type: AdamW                   # AdamW | SGD
+  lr: 0.0001
+  weight_decay: 0.2
+  # momentum: 0.9               # SGD only
+  # nesterov: false            # SGD only
+
+scheduler:
+  type: Cosine                  # Cosine | OneCycleLR
+  # --- OneCycleLR only: ---
+  # max_lr: 0.001
+  # pct_start: 0.04
+  # anneal_strategy: cos
+  # div_factor: 10
+  # final_div_factor: 100.0
+
+loss: crossentropy              # crossentropy | focal | tversky | combined
+
+inference:
+  n_clicks: 5                   # interactive refinement iterations per tree
+  reclick_thr: 0.99             # add a correction click when a block IoU <= this (legacy hardcoded 0.99)
+  force_divide: false           # assign unclassified points to the best instance
+  detection_iou: 0.7            # evaluation: an instance counts as detected if IoU > this

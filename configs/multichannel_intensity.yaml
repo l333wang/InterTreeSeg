@@ -1,0 +1,81 @@
+# Multi-channel example: feed intensity (source column 3) into the network
+# alongside the two click channels.
+#
+# Load this on top of default.yaml:
+#   from intertreeseg.config import load_config
+#   cfg = load_config("configs/multichannel_intensity.yaml", base="configs/default.yaml")
+# or with the tools:
+#   python tools/train.py --cfg configs/multichannel_intensity.yaml ...
+#   (this file is self-contained: it copies the default backbone below.)
+#
+# build_model() derives in_channels = len(feat_channels) + n_click_channels
+#            = 1 (intensity) + 2 (clicks) = 3, and sizes the embedding stem to 3.
+#
+# NOTE: a 3-channel model CANNOT strict-load the 2-channel released checkpoint
+# (the embedding stem differs). To fine-tune from it, load with strict=False and
+# re-initialize only `embedding.stem`.
+
+model:
+  num_classes: 2
+  backbone:
+    order: [z, z-trans, hilbert, hilbert-trans]
+    stride: [2, 2, 2, 2]
+    enc_depths: [2, 2, 2, 6, 2]
+    enc_channels: [32, 64, 128, 256, 512]
+    enc_num_head: [2, 4, 8, 16, 32]
+    enc_patch_size: [512, 512, 512, 512, 512]
+    dec_depths: [2, 2, 2, 2]
+    dec_channels: [64, 64, 128, 256]
+    dec_num_head: [4, 4, 8, 16]
+    dec_patch_size: [512, 512, 512, 512]
+    mlp_ratio: 4
+    qkv_bias: true
+    qk_scale: null
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop_path: 0.3
+    shuffle_orders: true
+    pre_norm: true
+    enable_rpe: false
+    enable_flash: true
+    cls_mode: false
+    pdnorm_bn: false
+    pdnorm_ln: false
+
+data:
+  data_dir: data/trees
+  coord_channels: [0, 1, 2]
+  feat_channels: [3]            # intensity source column -> F=1 -> in_channels=3
+  feat_norm: [standardize]      # z-score intensity; xyz untouched
+  coord_norm: minmax_block
+  label_channel: 4
+  aux_label_channel: 5
+  num_point: 8192
+  num_sample: 4
+  block_size: 8192
+  bbox_delta: 0.25
+  clicks:
+    n_channels: 2
+    sigma: 0.01
+    pos_max: 16
+    neg_max: 16
+    min_obj_points: 100
+    min_obj_points_infer: 1000
+    coord_space: raw
+  augment:
+    enabled: true
+    double: true
+    rot_axis: z
+
+grid_size: 0.02
+batch_size: 60
+epoch: 100
+optimizer: {type: AdamW, lr: 0.0001, weight_decay: 0.2}
+scheduler: {type: Cosine}
+loss: crossentropy
+
+inference:
+  n_clicks: 5
+  reclick_thr: 0.99
+  force_divide: false
+  detection_iou: 0.7
