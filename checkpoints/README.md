@@ -7,9 +7,7 @@ files). Download them and place the `.pth` here.
 
 | Checkpoint | in_channels | Notes | Link |
 | --- | --- | --- | --- |
-| `E100_B60_FOR05x4_novali_newmodel512.pth` | 2 (xyz + 2 clicks) | default model used by the web app and CLI | **[Google Drive](<ADD GOOGLE DRIVE LINK>)** |
-
-<!-- TODO: replace <ADD GOOGLE DRIVE LINK> with the shared Google Drive URL. -->
+| `E100_B60_FOR05x4_novali_newmodel512.pth` | 2 (xyz + 2 clicks) | default model used by the web app and CLI | **[Google Drive](https://drive.google.com/drive/folders/19JWw8IiEG7m9vPdpB__U-2uqdnRzNHr4?usp=drive_link)** |
 
 ## Setup
 
