@@ -15,11 +15,17 @@ log/
 result/
 *.pth
 *.ckpt
+# (weights are distributed via Google Drive, not committed; see checkpoints/README.md)
 
 # Data (do not commit datasets / generated blocks)
 data/
 *.h5
 *.ply
+
+# Node / frontend build artifacts
+node_modules/
+app/frontend/dist/
+*.tsbuildinfo
 
 # Env / editor
 .venv/

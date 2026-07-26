@@ -39,6 +39,18 @@ packaged for reuse and reproducibility.
 - **Reproducible & tested** — layered tests from channel-math up to end-to-end
   GPU scene inference; a fully-resolved config is saved with every run.
 
+## 🖥️ Interactive web app
+
+The repo also ships a browser-based **interactive annotation app** (`app/`):
+frame a tree in a top-view box, place positive/negative clicks, get real-time
+segmentation, refine with clicks or lasso/brush, and export full-resolution
+per-point instance labels + a per-tree attribute table. FastAPI backend
+(in-process GPU inference via this library) + React/three.js frontend.
+
+![InterTreeSeg annotation app](app/app.jpg)
+
+See [`app/README.md`](app/README.md) for setup and usage.
+
 ## 📦 Installation
 
 The model depends on CUDA-specific builds of `torch`, `spconv`, `flash-attn`, and

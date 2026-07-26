@@ -1,0 +1,15 @@
+# Web layer
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+websockets>=12.0
+
+# Numerics / IO
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10          # cKDTree for spatial index / picking / cropping
+
+# Model inference (only needed when the real PTv3 InferenceService is enabled;
+# the default MockInferenceService has no torch dependency)
+# torch                # install matching your CUDA in the Point / treescaling env
+# laspy                # later: .las/.laz support
