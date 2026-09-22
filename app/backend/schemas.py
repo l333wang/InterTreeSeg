@@ -65,6 +65,9 @@ class AttributeModel(BaseModel):
 class CommitRequest(BaseModel):
     # No point list: the server commits its current full-resolution working mask.
     attributes: AttributeModel = Field(default_factory=AttributeModel)
+    # interaction stats for evaluation (recorded per tree)
+    n_clicks: Optional[int] = None
+    elapsed_s: Optional[float] = None
 
 
 class ScreenSelection(BaseModel):

@@ -17,7 +17,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from . import config
 from .inference import Click, get_inference_service
-from .io.exporter import export_attributes_csv, export_points_txt
+from .io.exporter import export_attributes_csv, export_evaluation_csv, export_points_txt
 from .schemas import (
     AssignScreenRequest,
     CommitRequest,
@@ -96,6 +96,14 @@ def get_points(sid: str):
     return Response(content=interleaved.tobytes(), media_type="application/octet-stream")
 
 
+@app.get("/api/sessions/{sid}/field")
+def get_field(sid: str, name: str = "height"):
+    """Binary stream: float32 scalar per RENDERED point, for the given color field
+    (height | intensity | gt_instance | gt_semantic)."""
+    s = _session(sid)
+    return Response(content=s.field_values(name).tobytes(), media_type="application/octet-stream")
+
+
 @app.get("/api/sessions/{sid}/labels")
 def get_labels(sid: str):
     """Binary stream: int32 instance id per RENDERED point (0 = unlabeled)."""
@@ -120,8 +128,15 @@ def _run_infer(s, req: InferRequest) -> InferResponse:
         cand = s.full_index.crop_bbox_xy(b.x_min, b.y_min, b.x_max, b.y_max, b.z_min, b.z_max)
     else:
         cand = np.arange(s.n_full)
+    # Exclude points already committed to another tree: once a tree is confirmed
+    # its points leave the working pool, so trees never overlap and the next tree
+    # cannot re-include an earlier tree's points.
+    cand = cand[s.full_labels[cand] == 0]
     s.set_current_block(cand)                        # manual edits restricted to this block
     clicks = [Click(c.x, c.y, c.z, c.positive) for c in req.clicks]
+    if cand.size == 0:                               # whole crop already labeled
+        s.set_current_mask(np.empty(0, dtype=np.int64))
+        return InferResponse(mask_indices=[], count=0, elapsed_ms=0.0)
     res = get_inference_service().infer(s.full_xyz, cand, clicks)
     display = s.set_current_mask(res.mask_indices)   # store full mask, map to rendered points
     return InferResponse(
@@ -138,17 +153,19 @@ def _run_infer(s, req: InferRequest) -> InferResponse:
 def commit(sid: str, req: CommitRequest):
     """Commit the current full-resolution working mask as a new instance."""
     s = _session(sid)
+    s.push_undo()
     try:
-        inst, display = s.commit_current(req.attributes.model_dump())
+        inst, display, ev = s.commit_current(req.attributes.model_dump(), req.n_clicks, req.elapsed_s)
     except ValueError as e:
         raise HTTPException(409, str(e))
-    return {"instance": inst.to_dict(), "display_indices": display.tolist()}
+    return {"instance": inst.to_dict(), "display_indices": display.tolist(), "eval": ev}
 
 
 @app.post("/api/sessions/{sid}/mask/edit")
 def edit_mask(sid: str, req: EditMaskRequest):
     """Manual lasso/brush edit of the current working mask, at full resolution."""
     s = _session(sid)
+    s.push_undo()
     full_idx = _select_full(s, req.selection)
     display = s.edit_current_mask(full_idx, req.add)
     return {"mask_indices": display.tolist(), "count": int(s.current_mask.size)}
@@ -156,8 +173,63 @@ def edit_mask(sid: str, req: EditMaskRequest):
 
 @app.post("/api/sessions/{sid}/mask/clear")
 def clear_mask(sid: str):
-    _session(sid).clear_current_mask()
+    s = _session(sid)
+    s.push_undo()
+    s.clear_current_mask()
     return {"ok": True}
+
+
+@app.post("/api/sessions/{sid}/undo")
+def undo(sid: str):
+    s = _session(sid)
+    ok = s.undo()
+    return {"ok": ok, "mask_indices": s.current_display_mask().tolist(),
+            "can_undo": bool(s._undo), "can_redo": bool(s._redo)}
+
+
+@app.post("/api/sessions/{sid}/redo")
+def redo(sid: str):
+    s = _session(sid)
+    ok = s.redo()
+    return {"ok": ok, "mask_indices": s.current_display_mask().tolist(),
+            "can_undo": bool(s._undo), "can_redo": bool(s._redo)}
+
+
+@app.post("/api/sessions/{sid}/brush")
+def brush(sid: str, body: dict):
+    """3D ball-query brush that paints labels.
+
+    Geometry (one of):
+      - ball    : {center: [x,y,z], radius: float}  — 3D sphere at the picked surface.
+      - through : {selection: {kind:"disc", view_proj, vw, vh, cx, cy, r}} — the
+                  on-screen brush circle projected through the whole depth (reaches
+                  interior points the surface ball can't).
+      - lasso   : {selection: {kind:"polygon", view_proj, vw, vh, polygon}} — points
+                  whose screen projection falls inside a freehand polygon (all depths).
+    plus: target: "mask" | <instance id>, mode: "fg" | "bg" | "toggle".
+    """
+    s = _session(sid)
+    s.push_undo()
+    sel = body.get("selection")
+    if sel is not None:
+        if sel.get("kind") == "polygon":
+            idx = project.select_polygon(s.full_xyz, sel["view_proj"], sel["vw"], sel["vh"], sel["polygon"])
+        else:
+            idx = project.select_disc(s.full_xyz, sel["view_proj"], sel["vw"], sel["vh"], sel["cx"], sel["cy"], sel["r"])
+    else:
+        idx = s.full_index.ball(body["center"], float(body.get("radius", 0.0)))
+    target = body.get("target", "mask")
+    mode = body.get("mode", "fg")
+    if target == "mask":
+        if mode == "toggle":
+            display = s.toggle_current_mask(idx)
+        else:
+            display = s.edit_current_mask(idx, mode == "fg")
+        return {"mask_indices": display.tolist(), "count": int(s.current_mask.size)}
+    iid = int(target)
+    if mode == "toggle":
+        return s.toggle_instance_points(idx, iid)
+    return s.paint_instance_points(idx, iid, mode == "fg")
 
 
 @app.get("/api/sessions/{sid}/instances")
@@ -171,6 +243,7 @@ def update_instance(sid: str, iid: int, attributes: dict):
     s = _session(sid)
     if iid not in s.instances:
         raise HTTPException(404, f"No instance {iid}")
+    s.push_undo()
     return {"instance": s.update_instance(iid, attributes).to_dict()}
 
 
@@ -182,6 +255,7 @@ def rename_instance(sid: str, iid: int, body: dict):
         new_id = int(body.get("new_id"))
     except (TypeError, ValueError):
         raise HTTPException(400, "new_id must be an integer")
+    s.push_undo()
     try:
         inst = s.rename_instance(iid, new_id)
     except KeyError:
@@ -194,6 +268,7 @@ def rename_instance(sid: str, iid: int, body: dict):
 @app.delete("/api/sessions/{sid}/instances/{iid}")
 def delete_instance(sid: str, iid: int):
     s = _session(sid)
+    s.push_undo()
     s.delete_instance(iid)
     return {"ok": True}
 
@@ -203,6 +278,7 @@ def assign_points(sid: str, req: AssignScreenRequest):
     """Manual edit of a committed instance: reassign full-res points inside the
     screen selection to `target` (0 = unlabeled)."""
     s = _session(sid)
+    s.push_undo()
     full_idx = _select_full(s, req.selection)
     affected = s.assign_full(full_idx, req.target)
     return {"ok": True, "target": req.target, "affected": affected}
@@ -252,6 +328,31 @@ def export_attributes(sid: str):
         iter([data]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=trees.csv"},
+    )
+
+
+@app.post("/api/sessions/{sid}/session_time")
+def set_session_time(sid: str, body: dict):
+    """Record the manual Start/Stop timer total (seconds) as the session's final time."""
+    s = _session(sid)
+    s.session_time_s = round(float(body.get("seconds", 0.0)), 2)
+    return {"ok": True, "session_time_s": s.session_time_s}
+
+
+@app.get("/api/sessions/{sid}/evaluation")
+def get_evaluation(sid: str):
+    """Per-tree interaction/IoU records + session summary."""
+    return _session(sid).evaluation()
+
+
+@app.get("/api/sessions/{sid}/export/evaluation")
+def export_evaluation(sid: str):
+    s = _session(sid)
+    data = export_evaluation_csv(s)
+    return StreamingResponse(
+        iter([data]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=evaluation.csv"},
     )
 
 

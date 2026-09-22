@@ -10,15 +10,16 @@ build/
 dist/
 .ipynb_checkpoints/
 
-# Runs & outputs
-log/
-result/
+# Runs & outputs (repo-root only; leading slash so we don't ignore package dirs
+# like intertreeseg/data/ that happen to share these names)
+/log/
+/result/
 *.pth
 *.ckpt
 # (weights are distributed via Google Drive, not committed; see checkpoints/README.md)
 
-# Data (do not commit datasets / generated blocks)
-data/
+# Data (do not commit datasets / generated blocks) — repo-root folder only
+/data/
 *.h5
 *.ply
 

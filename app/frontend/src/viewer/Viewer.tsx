@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { annotator } from "./annotator";
 import { useStore } from "../state/store";
-import type { BBox, ScreenSelection } from "../api/client";
+import type { BBox } from "../api/client";
 import { t } from "../i18n";
 
 // Refined thin red crosshair (center gap + dot); hotspot at 12,12.
@@ -20,6 +20,8 @@ export default function Viewer() {
   const loading = useStore((s) => s.loading);
   const loadingMsg = useStore((s) => s.loadingMsg);
   const brushRadius = useStore((s) => s.brushRadius);
+  const brushMode = useStore((s) => s.brushMode);
+  const brushShape = useStore((s) => s.brushShape);
   const [brushCursor, setBrushCursor] = useState<{ x: number; y: number } | null>(null);
 
   const drag = useRef<{ x: number; y: number; moved: boolean; active: boolean }>({
@@ -51,7 +53,7 @@ export default function Viewer() {
       const s = useStore.getState();
       return s.maskIndices.length + ":" + s.instances.map((i) => i.id).join(",") +
         ":" + [...s.hiddenInstances].join(",") +
-        ":" + (s.bbox ? 1 : 0) + ":" + s.clicks.length;   // focus-dim triggers
+        ":" + (s.bbox ? 1 : 0) + ":" + s.clicks.length + ":" + (s.hideMask ? 1 : 0);   // recolor triggers
     }
   }, []);
 
@@ -64,8 +66,8 @@ export default function Viewer() {
     // Explicit resets are the "Reset view" / "Top view" buttons.
     if (tool === "bbox") sc.topView();
     sc.setRotateEnabled(tool === "orbit" || tool === "pos" || tool === "neg");
-    // Guide the user: manual tools need a target (working tree or selected instance).
-    if (tool === "lasso" || tool === "brush") {
+    // Guide the user: brush/lasso need a target (working tree or selected instance).
+    if (tool === "brush" || tool === "lasso") {
       const st = useStore.getState();
       if (st.maskIndices.length === 0 && st.clicks.length === 0 && st.selectedInstance == null) {
         st.setStatus(t("st.manualNeed"));
@@ -118,13 +120,20 @@ export default function Viewer() {
       st.setTool("pos");
       st.setStatus(t("st.box"));
       setSelRect(null);
+    } else if (tool === "brush") {
+      if (st.brushShape === "through") {
+        // through-depth: screen circle projected through all depths (reaches interior).
+        annotator.brushThrough(p.x, p.y, st.brushRadius);
+      } else {
+        // surface ball: pick the point under the cursor, select a world-space ball.
+        const hit = sc.pick(e.clientX, e.clientY);
+        if (hit) annotator.brushBall(hit.world, st.brushRadius);
+      }
     } else if (tool === "lasso") {
       const poly = lassoRef.current;
       setLassoPts([]);
       lassoRef.current = [];
-      if (poly.length >= 3) applyManual(annotator.makeSelection("polygon", { polygon: poly }), !e.altKey);
-    } else if (tool === "brush") {
-      applyManual(annotator.makeSelection("disc", { cx: p.x, cy: p.y, r: st.brushRadius }), !e.altKey);
+      if (poly.length >= 3) annotator.lassoSelect(poly);
     } else if ((tool === "pos" || tool === "neg") && !d.moved) {
       const hit = sc.pick(e.clientX, e.clientY);
       if (hit) {
@@ -136,19 +145,6 @@ export default function Viewer() {
       }
     }
   };
-
-  function applyManual(sel: ScreenSelection, add: boolean) {
-    const st = useStore.getState();
-    if (st.maskIndices.length > 0 || st.clicks.length > 0) {
-      annotator.editMaskScreen(sel, add);
-      st.setStatus(t(add ? "st.manualAdd" : "st.manualRemove"));
-    } else if (st.selectedInstance != null) {
-      annotator.assignScreen(sel, add ? st.selectedInstance : 0);
-      st.setStatus(t("st.manualInst", { id: st.selectedInstance }));
-    } else {
-      st.setStatus(t("st.manualNeed"));
-    }
-  }
 
   return (
     <div
@@ -167,7 +163,9 @@ export default function Viewer() {
       {lassoPts.length > 1 && (
         <svg style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
           <polyline points={lassoPts.map((p) => p.join(",")).join(" ")}
-                    fill="rgba(74,158,255,0.12)" stroke="#4a9eff" strokeDasharray="4 3" strokeWidth={1.5} />
+                    fill={brushMode === "fg" ? "rgba(53,208,127,0.12)" : "rgba(255,93,93,0.12)"}
+                    stroke={brushMode === "fg" ? "#35d07f" : "#ff5d5d"}
+                    strokeDasharray="4 3" strokeWidth={1.5} />
         </svg>
       )}
       {tool === "brush" && brushCursor && (
@@ -175,7 +173,8 @@ export default function Viewer() {
           position: "absolute", pointerEvents: "none",
           left: brushCursor.x - brushRadius, top: brushCursor.y - brushRadius,
           width: brushRadius * 2, height: brushRadius * 2, borderRadius: "50%",
-          border: "1.5px solid #4a9eff", background: "rgba(74,158,255,0.10)",
+          border: `1.5px ${brushShape === "through" ? "dashed" : "solid"} ${brushMode === "fg" ? "#35d07f" : "#ff5d5d"}`,
+          background: brushMode === "fg" ? "rgba(53,208,127,0.12)" : "rgba(255,93,93,0.12)",
         }} />
       )}
       {loading && (

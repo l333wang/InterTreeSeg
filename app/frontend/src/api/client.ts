@@ -18,6 +18,32 @@ export interface BBox {
 }
 export interface InferResponse { mask_indices: number[]; count: number; elapsed_ms: number; }
 
+export interface EvalRecord {
+  instance_id: number;
+  clicks: number | null;
+  time_s: number | null;
+  point_count: number;
+  matched_gt: number | null;
+  gt_point_count: number;
+  iou: number | null;
+}
+export interface EvalSummary {
+  n_trees: number;
+  has_gt: boolean;
+  session_time_s: number | null;   // manual Start/Stop total (the "final time")
+  total_clicks: number;
+  mean_clicks: number | null;
+  total_tree_time_s: number;
+  mean_time_s: number | null;
+  mean_iou: number | null;
+  detection_rate_0p5: number | null;
+}
+export interface CommitResponse {
+  instance: Instance;
+  display_indices: number[];
+  eval: EvalRecord;
+}
+
 export interface Instance {
   id: number;
   color: [number, number, number];
@@ -34,6 +60,20 @@ export interface Instance {
 }
 
 export interface AppConfig { species: string[]; health_status: string[]; }
+
+export interface BrushResult {
+  mask_indices?: number[];
+  count?: number;
+  added?: number;
+  removed?: number;
+  instance_id?: number;
+}
+export interface DiscSel { kind: "disc"; view_proj: number[]; vw: number; vh: number; cx: number; cy: number; r: number; }
+export interface PolySel { kind: "polygon"; view_proj: number[]; vw: number; vh: number; polygon: number[][]; }
+export type BrushBody = { target: "mask" | number; mode: "fg" | "bg" | "toggle" } & (
+  | { center: [number, number, number]; radius: number }
+  | { selection: DiscSel | PolySel }
+);
 
 export interface ScreenSelection {
   view_proj: number[];   // three.js Matrix4.elements (16)
@@ -75,6 +115,12 @@ export const api = {
     return new Float32Array(buf);
   },
 
+  // Binary: Float32 scalar per rendered point, for a coloring field.
+  async field(sid: string, name: string): Promise<Float32Array> {
+    const buf = await fetch(`/api/sessions/${sid}/field?name=${encodeURIComponent(name)}`).then((r) => r.arrayBuffer());
+    return new Float32Array(buf);
+  },
+
   // Binary: Int32 instance-id * N
   async labels(sid: string): Promise<Int32Array> {
     const buf = await fetch(`/api/sessions/${sid}/labels`).then((r) => r.arrayBuffer());
@@ -84,15 +130,26 @@ export const api = {
   infer: (sid: string, bbox: BBox | null, clicks: Click[]) =>
     jpost<InferResponse>(`/api/sessions/${sid}/infer`, { bbox, clicks }),
 
-  commit: (sid: string, attributes: Partial<Instance>) =>
-    jpost<{ instance: Instance; display_indices: number[] }>(
-      `/api/sessions/${sid}/commit`, { attributes }),
+  commit: (sid: string, attributes: Partial<Instance>, meta?: { n_clicks?: number; elapsed_s?: number }) =>
+    jpost<CommitResponse>(`/api/sessions/${sid}/commit`, { attributes, ...(meta ?? {}) }),
 
   editMask: (sid: string, selection: ScreenSelection, add: boolean) =>
     jpost<{ mask_indices: number[]; count: number }>(
       `/api/sessions/${sid}/mask/edit`, { selection, add }),
 
   clearMask: (sid: string) => jpost(`/api/sessions/${sid}/mask/clear`, {}),
+
+  undo: (sid: string) =>
+    jpost<{ ok: boolean; mask_indices: number[]; can_undo: boolean; can_redo: boolean }>(
+      `/api/sessions/${sid}/undo`, {}),
+  redo: (sid: string) =>
+    jpost<{ ok: boolean; mask_indices: number[]; can_undo: boolean; can_redo: boolean }>(
+      `/api/sessions/${sid}/redo`, {}),
+
+  // Paint brush / lasso. target = "mask" or an instance id; mode = fg | bg | toggle.
+  // Geometry: a 3D ball (center+radius) OR a screen selection (disc / polygon).
+  brush: (sid: string, body: BrushBody) =>
+    jpost<BrushResult>(`/api/sessions/${sid}/brush`, body),
 
   instances: (sid: string) =>
     fetch(`/api/sessions/${sid}/instances`).then((r) => r.json() as Promise<{ instances: Instance[] }>),
@@ -116,6 +173,15 @@ export const api = {
   computeGeometry: (sid: string) =>
     jpost<{ instances: Instance[] }>(`/api/sessions/${sid}/compute_geometry`, {}),
 
+  evaluation: (sid: string) =>
+    fetch(`/api/sessions/${sid}/evaluation`).then(
+      (r) => r.json() as Promise<{ records: EvalRecord[]; summary: EvalSummary }>),
+
+  setSessionTime: (sid: string, seconds: number) =>
+    jpost<{ ok: boolean; session_time_s: number }>(
+      `/api/sessions/${sid}/session_time`, { seconds }),
+
   exportPointsUrl: (sid: string) => `/api/sessions/${sid}/export/points`,
   exportAttributesUrl: (sid: string) => `/api/sessions/${sid}/export/attributes`,
+  exportEvaluationUrl: (sid: string) => `/api/sessions/${sid}/export/evaluation`,
 };

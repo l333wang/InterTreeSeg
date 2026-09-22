@@ -1,7 +1,7 @@
 import { create } from "zustand";
-import type { AppConfig, BBox, Click, Instance, Bounds } from "../api/client";
+import type { AppConfig, BBox, Click, Instance, Bounds, EvalRecord, EvalSummary } from "../api/client";
 
-export type Tool = "orbit" | "bbox" | "pos" | "neg" | "lasso" | "brush";
+export type Tool = "orbit" | "bbox" | "pos" | "neg" | "brush" | "lasso";
 export type Lang = "en" | "zh";
 
 interface AppState {
@@ -18,12 +18,26 @@ interface AppState {
   tool: Tool;
   realtime: boolean;
   brushRadius: number;
+  brushMode: "fg" | "bg";        // brush/lasso paints foreground (label) or background (erase)
+  brushShape: "ball" | "through"; // ball = 3D sphere at surface; through = screen disc through depth
+  colorField: "height" | "intensity" | "gt_instance" | "gt_semantic"; // point-cloud coloring field
 
   // current (uncommitted) tree working state
   bbox: BBox | null;
   clicks: Click[];
   maskIndices: number[];
   lastInferMs: number | null;
+  treeStartTime: number | null;   // ms epoch when work on the current tree began
+  hideMask: boolean;              // hide the in-progress mask overlay (inspect raw points)
+
+  // evaluation (click count / time / IoU per confirmed tree)
+  evalRecords: EvalRecord[];
+  evalSummary: EvalSummary | null;
+
+  // manual session stopwatch ("final time")
+  timerRunning: boolean;
+  timerStartedAt: number | null;   // ms epoch of current run
+  timerAccumMs: number;            // accumulated across runs
 
   // committed instances
   instances: Instance[];
@@ -48,11 +62,20 @@ interface AppState {
   setTool: (t: Tool) => void;
   toggleRealtime: () => void;
   setBrushRadius: (r: number) => void;
+  setBrushMode: (m: "fg" | "bg") => void;
+  setBrushShape: (s: "ball" | "through") => void;
+  setColorField: (f: "height" | "intensity" | "gt_instance" | "gt_semantic") => void;
   setBBox: (b: BBox | null) => void;
   addClick: (c: Click) => void;
   clearClicks: () => void;
   setMask: (idx: number[], ms: number | null) => void;
   clearCurrent: () => void;
+  toggleHideMask: () => void;
+  addEvalRecord: (r: EvalRecord) => void;
+  setEvalSummary: (s: EvalSummary | null) => void;
+  startTimer: () => void;
+  stopTimer: () => number;   // returns total elapsed seconds
+  resetTimer: () => void;
   setInstances: (list: Instance[]) => void;
   addInstance: (i: Instance) => void;
   removeInstance: (iid: number) => void;
@@ -62,7 +85,7 @@ interface AppState {
   setDialogOpen: (v: boolean) => void;
 }
 
-export const useStore = create<AppState>((set) => ({
+export const useStore = create<AppState>((set, get) => ({
   config: null,
   sessionId: null,
   bounds: null,
@@ -73,11 +96,23 @@ export const useStore = create<AppState>((set) => ({
   tool: "orbit",
   realtime: true,
   brushRadius: 18, // screen-space brush radius in pixels
+  brushMode: "fg",
+  brushShape: "ball",
+  colorField: "height",
 
   bbox: null,
   clicks: [],
   maskIndices: [],
   lastInferMs: null,
+  treeStartTime: null,
+  hideMask: false,
+
+  evalRecords: [],
+  evalSummary: null,
+
+  timerRunning: false,
+  timerStartedAt: null,
+  timerAccumMs: 0,
 
   instances: [],
   selectedInstance: null,
@@ -104,15 +139,38 @@ export const useStore = create<AppState>((set) => ({
       bbox: null,
       clicks: [],
       maskIndices: [],
+      treeStartTime: null,
+      hideMask: false,
+      evalRecords: [],
+      evalSummary: null,
+      timerRunning: false,
+      timerStartedAt: null,
+      timerAccumMs: 0,
     }),
   setTool: (tool) => set({ tool }),
   toggleRealtime: () => set((s) => ({ realtime: !s.realtime })),
   setBrushRadius: (brushRadius) => set({ brushRadius }),
-  setBBox: (bbox) => set({ bbox }),
-  addClick: (c) => set((s) => ({ clicks: [...s.clicks, c] })),
+  setBrushMode: (brushMode) => set({ brushMode }),
+  setBrushShape: (brushShape) => set({ brushShape }),
+  setColorField: (colorField) => set({ colorField }),
+  // starting a tree = first bbox or first click; stamp the start time once
+  setBBox: (bbox) => set((s) => ({ bbox, treeStartTime: s.treeStartTime ?? (bbox ? Date.now() : null) })),
+  addClick: (c) => set((s) => ({ clicks: [...s.clicks, c], treeStartTime: s.treeStartTime ?? Date.now() })),
   clearClicks: () => set({ clicks: [] }),
   setMask: (maskIndices, lastInferMs) => set({ maskIndices, lastInferMs }),
-  clearCurrent: () => set({ bbox: null, clicks: [], maskIndices: [], lastInferMs: null }),
+  clearCurrent: () => set({ bbox: null, clicks: [], maskIndices: [], lastInferMs: null, treeStartTime: null }),
+  toggleHideMask: () => set((s) => ({ hideMask: !s.hideMask })),
+  addEvalRecord: (r) => set((s) => ({ evalRecords: [...s.evalRecords, r] })),
+  setEvalSummary: (evalSummary) => set({ evalSummary }),
+  startTimer: () => set((s) => (s.timerRunning ? {} : { timerRunning: true, timerStartedAt: Date.now() })),
+  stopTimer: () => {
+    const s = get();
+    if (!s.timerRunning) return s.timerAccumMs / 1000;
+    const accum = s.timerAccumMs + (Date.now() - (s.timerStartedAt ?? Date.now()));
+    set({ timerRunning: false, timerStartedAt: null, timerAccumMs: accum });
+    return accum / 1000;
+  },
+  resetTimer: () => set({ timerRunning: false, timerStartedAt: null, timerAccumMs: 0 }),
   setInstances: (instances) => set({ instances }),
   addInstance: (i) => set((s) => ({ instances: [...s.instances, i] })),
   removeInstance: (iid) =>

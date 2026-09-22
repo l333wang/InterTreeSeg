@@ -19,6 +19,7 @@ the pretrained weights apply unchanged).
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -68,6 +69,8 @@ class Ptv3InferenceService(InferenceService):
         self.num_point = config.PTV3_NUM_POINT
         self.grid_size = config.PTV3_GRID_SIZE
         self.sigma = config.PTV3_CLICK_SIGMA
+        # blocks per forward pass — bounds GPU memory regardless of scene size.
+        self.chunk = max(1, int(os.environ.get("ANNO_PTV3_CHUNK", "8")))
 
         model = PointTransformerV3(
             in_channels=2,
@@ -119,21 +122,43 @@ class Ptv3InferenceService(InferenceService):
             rng[rng == 0] = 1.0
             coords[b] = ((bxyz - mn) / rng).astype(np.float32)
 
-        total = ndiv * self.num_point
-        coord = torch.from_numpy(coords.reshape(total, 3)).to(self.device)
-        feat = torch.from_numpy(feats.reshape(total, 2)).to(self.device)
-        batch = torch.arange(ndiv, dtype=torch.long, device=self.device).repeat_interleave(
-            self.num_point
-        )
-        data = {"feat": feat, "coord": coord, "batch": batch, "grid_size": self.grid_size}
-
+        # Run the model in CHUNKS of blocks so GPU memory stays bounded no matter
+        # how large the crop/scene is (blocks are independent -> identical result).
+        # On a CUDA OOM, halve the chunk and retry; this makes inference crash-proof
+        # on huge point clouds instead of killing the backend.
+        pred = np.empty(ndiv * self.num_point, dtype=np.int64)
+        chunk = self.chunk
         with torch.inference_mode():
-            logits = self.model(data)
-            logits = logits.view(-1, logits.shape[-1])
-            pred = logits.argmax(dim=-1).cpu().numpy()
+            s = 0
+            while s < ndiv:
+                e = min(s + chunk, ndiv)
+                try:
+                    pred[s * self.num_point : e * self.num_point] = self._forward_blocks(coords, feats, s, e)
+                    s = e
+                except RuntimeError as ex:
+                    if "out of memory" in str(ex).lower() and (e - s) > 1:
+                        if self.device.type == "cuda":
+                            torch.cuda.empty_cache()
+                        chunk = max(1, (e - s) // 2)   # back off and retry this range
+                    else:
+                        raise
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
         fg_scene = np.unique(block_idx.reshape(-1)[pred == 1])
         return InferResult(fg_scene.astype(np.int64), (time.perf_counter() - t0) * 1e3)
+
+    def _forward_blocks(self, coords: np.ndarray, feats: np.ndarray, s: int, e: int) -> np.ndarray:
+        """Forward one contiguous range of blocks [s, e); returns per-point argmax."""
+        torch = self.torch
+        nb = e - s
+        coord = torch.from_numpy(coords[s:e].reshape(nb * self.num_point, 3)).to(self.device)
+        feat = torch.from_numpy(feats[s:e].reshape(nb * self.num_point, 2)).to(self.device)
+        batch = torch.arange(nb, dtype=torch.long, device=self.device).repeat_interleave(self.num_point)
+        logits = self.model({"feat": feat, "coord": coord, "batch": batch, "grid_size": self.grid_size})
+        out = logits.view(-1, logits.shape[-1]).argmax(dim=-1).cpu().numpy()
+        del coord, feat, batch, logits
+        return out
 
 
 def _click_heat(bxyz: np.ndarray, centers: np.ndarray, two_sigma: float) -> np.ndarray:

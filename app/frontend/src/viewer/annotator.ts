@@ -3,7 +3,7 @@
 // between the zustand store, the REST API, and the scene renderer.
 import * as THREE from "three";
 import { PointCloudScene } from "./scene";
-import { api, type Bounds, type Instance, type ScreenSelection } from "../api/client";
+import { api, type Bounds, type Instance, type ScreenSelection, type BrushBody, type DiscSel, type PolySel } from "../api/client";
 import { useStore } from "../state/store";
 import { t } from "../i18n";
 
@@ -38,15 +38,76 @@ class Annotator {
     return m;
   }
 
+  /** Recompute base point colors from a chosen data field (height/intensity/GT). */
+  async applyColorField() {
+    const st = useStore.getState();
+    if (!st.sessionId || !this.scene) return;
+    const field = st.colorField;
+    const values = await api.field(st.sessionId, field);
+    const categorical = field === "gt_instance" || field === "gt_semantic";
+    this.scene.setBaseColorField(values, categorical);
+    this.recolor();
+  }
+
   recolor() {
     if (!this.scene || !this.labels) return;
     const st = useStore.getState();
+    // hideMask hides the current selection ENTIRELY (label highlight + its raw
+    // points), so the tree being annotated disappears — lets you inspect what's
+    // behind / around it. Toggle off to bring it back.
     const maskSet = st.maskIndices.length ? new Set(st.maskIndices) : null;
-    // Focus mode: while annotating one tree (bbox / clicks / mask active), dim the
-    // unlabeled height-colored background so the highlighted tree stands out.
-    const focusing = st.maskIndices.length > 0 || st.clicks.length > 0 || st.bbox != null;
+    // Focus mode: while annotating one tree, dim the unlabeled background so the
+    // highlighted tree stands out (not while hiding).
+    const focusing = !st.hideMask && (st.maskIndices.length > 0 || st.clicks.length > 0 || st.bbox != null);
     const bgDim = focusing ? 0.5 : 0.9;
-    this.scene.recolor(this.labels, maskSet, st.hiddenInstances, this.colorMap(), bgDim);
+    this.scene.recolor(this.labels, maskSet, st.hiddenInstances, this.colorMap(), bgDim, st.hideMask);
+  }
+
+  /** What a brush/lasso stroke edits: the working mask, or a selected instance. */
+  private brushTarget(): "mask" | number | null {
+    const st = useStore.getState();
+    if (st.maskIndices.length > 0 || st.clicks.length > 0) return "mask";
+    if (st.selectedInstance != null) return st.selectedInstance;
+    return null;
+  }
+
+  /** Apply a paint geometry (ball or screen selection) with the current fg/bg mode. */
+  private async applyBrush(
+    target: "mask" | number,
+    geom: { center: [number, number, number]; radius: number } | { selection: DiscSel | PolySel }
+  ) {
+    const st = useStore.getState();
+    if (!st.sessionId) return;
+    const res = await api.brush(st.sessionId, { target, mode: st.brushMode, ...geom } as BrushBody);
+    if (target === "mask") {
+      useStore.getState().setMask(res.mask_indices ?? [], st.lastInferMs);
+      this.recolor();
+    } else {
+      await this.refreshLabels();
+      await this.refreshInstances();
+    }
+  }
+
+  /** Surface ball brush: 3D sphere around the picked point (pixel radius → world). */
+  async brushBall(center: THREE.Vector3, pixelRadius: number) {
+    const target = this.brushTarget();
+    if (target == null || !this.scene) { useStore.getState().setStatus(t("st.manualNeed")); return; }
+    const radius = this.scene.pixelToWorldRadius(center, pixelRadius);
+    await this.applyBrush(target, { center: [center.x, center.y, center.z], radius });
+  }
+
+  /** Through-depth brush: the on-screen circle projected through ALL depths. */
+  async brushThrough(cx: number, cy: number, pixelRadius: number) {
+    const target = this.brushTarget();
+    if (target == null || !this.scene) { useStore.getState().setStatus(t("st.manualNeed")); return; }
+    await this.applyBrush(target, { selection: { kind: "disc", ...this.scene.getViewProj(), cx, cy, r: pixelRadius } });
+  }
+
+  /** Lasso: freehand polygon selection through ALL depths. */
+  async lassoSelect(polygon: [number, number][]) {
+    const target = this.brushTarget();
+    if (target == null || !this.scene) { useStore.getState().setStatus(t("st.manualNeed")); return; }
+    await this.applyBrush(target, { selection: { kind: "polygon", ...this.scene.getViewProj(), polygon } });
   }
 
   // ---- inference ---------------------------------------------------------
@@ -95,15 +156,31 @@ class Annotator {
   async commitCurrent(attributes: Partial<Instance>) {
     const st = useStore.getState();
     if (!st.sessionId || st.maskIndices.length === 0) return;
-    const res = await api.commit(st.sessionId, attributes);   // server uses its full-res mask
+    const n_clicks = st.clicks.length;
+    const elapsed_s = st.treeStartTime != null ? (Date.now() - st.treeStartTime) / 1000 : undefined;
+    const res = await api.commit(st.sessionId, attributes, { n_clicks, elapsed_s });
     const inst = res.instance;
     for (const i of res.display_indices) this.labels![i] = inst.id;
-    useStore.getState().addInstance(inst);
-    useStore.getState().clearCurrent();
+    const store = useStore.getState();
+    store.addInstance(inst);
+    store.addEvalRecord(res.eval);
+    store.clearCurrent();
     this.scene!.clearClickMarkers();
     this.scene!.setBBoxHelper(null, 0, 0);
+    store.setTool("bbox");   // back to top-view bbox, ready to frame the next tree
     this.recolor();
-    useStore.getState().setStatus(t("st.committed", { id: inst.id, n: inst.point_count }));
+    const ev = res.eval;
+    store.setStatus(
+      t("st.committedEval", {
+        id: inst.id,
+        n: inst.point_count,
+        iou: ev.iou == null ? "—" : ev.iou.toFixed(3),
+        c: ev.clicks ?? n_clicks,
+        s: (ev.time_s ?? elapsed_s ?? 0).toFixed(1),
+      })
+    );
+    // refresh the session evaluation summary (for the top-bar chip)
+    api.evaluation(st.sessionId).then((e) => useStore.getState().setEvalSummary(e.summary)).catch(() => {});
   }
 
   // ---- manual editing (full-resolution, via backend screen projection) ---
@@ -132,12 +209,31 @@ class Annotator {
   makeSelection = (kind: "polygon" | "disc", extra: Partial<ScreenSelection>) =>
     this.selection(kind, extra);
 
+  /** Undo / redo the last editing operation (server-side snapshot stack). */
+  async undo() { await this._undoRedo("undo"); }
+  async redo() { await this._undoRedo("redo"); }
+  private async _undoRedo(which: "undo" | "redo") {
+    const st = useStore.getState();
+    if (!st.sessionId) return;
+    const res = which === "undo" ? await api.undo(st.sessionId) : await api.redo(st.sessionId);
+    if (!res.ok) { st.setStatus(t(which === "undo" ? "st.nothingUndo" : "st.nothingRedo")); return; }
+    // reset transient interaction; restore the working mask + labels from the server
+    st.setBBox(null); st.clearClicks();
+    this.scene?.clearClickMarkers();
+    this.scene?.setBBoxHelper(null, 0, 0);
+    useStore.getState().setMask(res.mask_indices, null);
+    await this.refreshLabels();
+    await this.refreshInstances();
+    useStore.getState().setStatus(t(which === "undo" ? "st.undone" : "st.redone"));
+  }
+
   /** Discard the current working tree (clicks, bbox, mask) both client and server. */
   async clearWorking() {
     const st = useStore.getState();
     this.scene?.clearClickMarkers();
     this.scene?.setBBoxHelper(null, 0, 0);
     st.clearCurrent();
+    st.setTool("bbox");   // back to top-view bbox default state
     this.recolor();
     if (st.sessionId) await api.clearMask(st.sessionId);
   }

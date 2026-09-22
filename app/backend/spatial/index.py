@@ -25,6 +25,17 @@ class SpatialIndex:
         _, idx = self._tree3d.query(np.asarray(point, dtype=np.float64)[:3], k=1)
         return int(idx)
 
+    def ball(self, center: np.ndarray, radius: float) -> np.ndarray:
+        """Return indices of all points within `radius` (world units) of `center`.
+
+        A true 3D ball query (KD-tree), so it selects only points near the picked
+        surface — not everything the screen disc projects through in depth.
+        """
+        if self._tree3d is None:
+            self._tree3d = cKDTree(self.xyz)
+        idx = self._tree3d.query_ball_point(np.asarray(center, dtype=np.float64)[:3], float(radius))
+        return np.asarray(idx, dtype=np.int64)
+
     def crop_bbox_xy(
         self,
         x_min: float,

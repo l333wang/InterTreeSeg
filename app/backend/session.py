@@ -8,6 +8,7 @@ render decimation — every original point gets an accurate label.
 """
 from __future__ import annotations
 
+import gc
 import os
 import threading
 import uuid
@@ -64,6 +65,20 @@ class Session:
         self.full_labels = np.zeros(self.n_full, dtype=np.int32)
         self.full_index = SpatialIndex(self.full_xyz)
 
+        # ground-truth per-point instance id (for IoU evaluation), if the file
+        # has that column; None when the scene carries no GT.
+        col = config.GT_INSTANCE_COL
+        self.gt_instance = (
+            raw[:, col].astype(np.int64) if raw.shape[1] > col else None
+        )
+        # per-confirmed-tree evaluation records (clicks / time / IoU vs GT)
+        self.eval_records: list[dict] = []
+        # total hands-on annotation time (seconds) from the manual Start/Stop timer
+        self.session_time_s: float | None = None
+        # undo/redo snapshots of the editable state
+        self._undo: list[dict] = []
+        self._redo: list[dict] = []
+
         # decimated render set (rendering only) — sampled to an EXACT fixed target
         # point count (evenly spaced across the cloud), so render cost is bounded
         # regardless of input size. Labels/inference/export stay full-resolution.
@@ -91,6 +106,25 @@ class Session:
     def render_xyz(self) -> np.ndarray:
         return self.points[:, :3]
 
+    def field_values(self, name: str) -> np.ndarray:
+        """Per-RENDER-point scalar for a coloring field.
+
+        name: height (z) | intensity | gt_instance (treeID) | gt_semantic.
+        Missing columns fall back to zeros.
+        """
+        ncol = self.full_points.shape[1]
+        if name == "intensity":
+            c = config.TXT_COLS.get("feat", 3)
+            col = self.full_points[:, c] if ncol > c else np.zeros(self.n_full)
+        elif name == "gt_instance":
+            col = self.gt_instance.astype(np.float64) if self.gt_instance is not None else np.zeros(self.n_full)
+        elif name == "gt_semantic":
+            c = config.TXT_COLS.get("gt_semantic", 5)
+            col = self.full_points[:, c] if ncol > c else np.zeros(self.n_full)
+        else:  # height
+            col = self.full_xyz[:, 2]
+        return np.ascontiguousarray(col[self.render_to_full], dtype=np.float32)
+
     def display_labels(self) -> np.ndarray:
         """Instance id per RENDERED point (derived from full labels)."""
         return self.full_labels[self.render_to_full]
@@ -100,6 +134,56 @@ class Session:
         flag = np.zeros(self.n_full, dtype=bool)
         flag[full_idx] = True
         return np.nonzero(flag[self.render_to_full])[0]
+
+    # ---- undo / redo -------------------------------------------------------
+    _MAX_UNDO = 30
+
+    def _snapshot(self) -> dict:
+        return {
+            "labels": self.full_labels.copy(),
+            "mask": self.current_mask.copy(),
+            "block": self.current_block.copy(),
+            "instances": {i: Instance(**asdict(x)) for i, x in self.instances.items()},
+            "next_id": self._next_id,
+            "eval": [dict(r) for r in self.eval_records],
+            "session_time_s": self.session_time_s,
+        }
+
+    def _apply(self, snap: dict) -> None:
+        self.full_labels = snap["labels"].copy()
+        self.current_mask = snap["mask"].copy()
+        self.current_block = snap["block"].copy()
+        self.instances = {i: Instance(**asdict(x)) for i, x in snap["instances"].items()}
+        self._next_id = snap["next_id"]
+        self.eval_records = [dict(r) for r in snap["eval"]]
+        self.session_time_s = snap["session_time_s"]
+
+    def push_undo(self) -> None:
+        """Snapshot the current editable state before a mutating operation."""
+        with self.lock:
+            self._undo.append(self._snapshot())
+            if len(self._undo) > self._MAX_UNDO:
+                self._undo.pop(0)
+            self._redo.clear()
+
+    def undo(self) -> bool:
+        with self.lock:
+            if not self._undo:
+                return False
+            self._redo.append(self._snapshot())
+            self._apply(self._undo.pop())
+            return True
+
+    def redo(self) -> bool:
+        with self.lock:
+            if not self._redo:
+                return False
+            self._undo.append(self._snapshot())
+            self._apply(self._redo.pop())
+            return True
+
+    def current_display_mask(self) -> np.ndarray:
+        return self.full_mask_to_display(self.current_mask)
 
     # ---- inference working mask -------------------------------------------
     def set_current_block(self, block_idx: np.ndarray) -> None:
@@ -130,9 +214,68 @@ class Session:
             self.current_mask = np.empty(0, dtype=np.int64)
             self.current_block = np.empty(0, dtype=np.int64)
 
+    def toggle_current_mask(self, full_idx: np.ndarray) -> np.ndarray:
+        """Brush-toggle: flip each point's membership in the working mask.
+
+        A point in the mask (label) is removed (-> background); a point not in it
+        is added. Restricted to the current bbox block, like manual edits.
+        """
+        with self.lock:
+            full_idx = np.asarray(full_idx, dtype=np.int64)
+            if self.current_block.size > 0:
+                flag = np.zeros(self.n_full, dtype=bool)
+                flag[self.current_block] = True
+                full_idx = full_idx[flag[full_idx]]
+            cur = set(self.current_mask.tolist())
+            for i in full_idx.tolist():
+                cur.discard(i) if i in cur else cur.add(i)
+            self.current_mask = np.fromiter(cur, dtype=np.int64, count=len(cur))
+            return self.full_mask_to_display(self.current_mask)
+
+    def paint_instance_points(self, full_idx: np.ndarray, iid: int, foreground: bool) -> dict:
+        """Brush-paint a committed instance: foreground adds unlabeled points to
+        ``iid``; background removes points currently labeled ``iid``. Other trees
+        are never stolen from."""
+        with self.lock:
+            full_idx = np.asarray(full_idx, dtype=np.int64)
+            lab = self.full_labels[full_idx]
+            if foreground:
+                sel = full_idx[lab == 0]
+                self.full_labels[sel] = iid
+                out = {"added": int(sel.size), "removed": 0}
+            else:
+                sel = full_idx[lab == iid]
+                self.full_labels[sel] = 0
+                out = {"added": 0, "removed": int(sel.size)}
+            if iid in self.instances:
+                self._recompute_one(iid)
+            out["instance_id"] = iid
+            return out
+
+    def toggle_instance_points(self, full_idx: np.ndarray, iid: int) -> dict:
+        """Brush-toggle for a committed instance: points labeled ``iid`` become
+        background (0); unlabeled points become ``iid``. Points belonging to other
+        trees are left untouched (never stolen). Returns counts + affected ids."""
+        with self.lock:
+            full_idx = np.asarray(full_idx, dtype=np.int64)
+            lab = self.full_labels[full_idx]
+            to_remove = full_idx[lab == iid]
+            to_add = full_idx[lab == 0]
+            self.full_labels[to_remove] = 0
+            self.full_labels[to_add] = iid
+            if iid in self.instances:
+                self._recompute_one(iid)
+            return {"added": int(to_add.size), "removed": int(to_remove.size), "instance_id": iid}
+
     # ---- instances ---------------------------------------------------------
-    def commit_current(self, attributes: dict) -> tuple[Instance, np.ndarray]:
-        """Commit the current working mask as a new instance. Returns (instance, display_idx)."""
+    def commit_current(
+        self, attributes: dict, n_clicks: int | None = None, elapsed_s: float | None = None
+    ) -> tuple[Instance, np.ndarray, dict]:
+        """Commit the current working mask as a new instance.
+
+        Returns (instance, display_idx, eval_record). ``n_clicks`` / ``elapsed_s``
+        are the user's interaction stats for this tree (recorded for evaluation).
+        """
         with self.lock:
             if self.current_mask.size == 0:
                 raise ValueError("No current mask to commit")
@@ -141,17 +284,75 @@ class Session:
                 raise ValueError(f"Instance id {iid} already exists")
             self._next_id = max(self._next_id, iid) + 1
 
-            self.full_labels[self.current_mask] = iid
+            mask = self.current_mask
+            ev = self.evaluate_mask(mask)  # IoU vs GT before clearing
+
+            self.full_labels[mask] = iid
             inst = Instance(id=iid, color=_instance_color(iid))
             for key in ("species", "dbh", "health_status", "notes"):
                 if attributes.get(key) is not None:
                     setattr(inst, key, attributes[key])
-            self._apply_geometry(inst, self.current_mask)
+            self._apply_geometry(inst, mask)
             self.instances[iid] = inst
-            display = self.full_mask_to_display(self.current_mask)
+            display = self.full_mask_to_display(mask)
+
+            record = {
+                "instance_id": iid,
+                "clicks": None if n_clicks is None else int(n_clicks),
+                "time_s": None if elapsed_s is None else round(float(elapsed_s), 2),
+                "point_count": inst.point_count,
+                "matched_gt": ev["matched_gt"],
+                "iou": ev["iou"],
+                "gt_point_count": ev["gt_point_count"],
+            }
+            self.eval_records.append(record)
+
             self.current_mask = np.empty(0, dtype=np.int64)
             self.current_block = np.empty(0, dtype=np.int64)
-            return inst, display
+            return inst, display, record
+
+    # ---- evaluation (IoU vs ground truth) ---------------------------------
+    def evaluate_mask(self, full_idx: np.ndarray) -> dict:
+        """Per-instance IoU of a predicted point set vs its best-matching GT tree.
+
+        The matched GT tree is the ground-truth instance with the largest overlap
+        with the prediction (ignoring the ground/unlabeled id). Returns
+        ``matched_gt`` / ``iou`` / ``gt_point_count`` (iou is None if no GT).
+        """
+        full_idx = np.asarray(full_idx, dtype=np.int64)
+        if self.gt_instance is None or full_idx.size == 0:
+            return {"matched_gt": None, "iou": None, "gt_point_count": 0}
+        gt = self.gt_instance
+        pred_gt = gt[full_idx]
+        valid = pred_gt[pred_gt != config.GT_IGNORE_ID]
+        if valid.size == 0:
+            return {"matched_gt": None, "iou": 0.0, "gt_point_count": 0}
+        vals, counts = np.unique(valid, return_counts=True)
+        matched = int(vals[np.argmax(counts)])
+        gt_pts = np.nonzero(gt == matched)[0]
+        inter = np.intersect1d(full_idx, gt_pts, assume_unique=False).size
+        union = full_idx.size + gt_pts.size - inter
+        iou = float(inter / union) if union > 0 else 0.0
+        return {"matched_gt": matched, "iou": round(iou, 4), "gt_point_count": int(gt_pts.size)}
+
+    def evaluation(self) -> dict:
+        """Per-tree evaluation records + a session summary."""
+        recs = self.eval_records
+        ious = [r["iou"] for r in recs if r["iou"] is not None]
+        times = [r["time_s"] for r in recs if r["time_s"] is not None]
+        clicks = [r["clicks"] for r in recs if r["clicks"] is not None]
+        summary = {
+            "n_trees": len(recs),
+            "has_gt": self.gt_instance is not None,
+            "session_time_s": self.session_time_s,       # manual Start/Stop total (authoritative "final time")
+            "total_clicks": int(sum(clicks)) if clicks else 0,
+            "mean_clicks": round(sum(clicks) / len(clicks), 2) if clicks else None,
+            "total_tree_time_s": round(sum(times), 2) if times else 0.0,  # summed per-tree auto times
+            "mean_time_s": round(sum(times) / len(times), 2) if times else None,
+            "mean_iou": round(sum(ious) / len(ious), 4) if ious else None,
+            "detection_rate_0p5": round(sum(1 for i in ious if i > 0.5) / len(ious), 4) if ious else None,
+        }
+        return {"records": recs, "summary": summary}
 
     def _apply_geometry(self, inst: Instance, full_idx: np.ndarray) -> None:
         geom = compute_geometry(self.full_xyz[full_idx])
@@ -255,6 +456,12 @@ class SessionManager:
     def create(self, source_path: str) -> Session:
         if not os.path.isfile(source_path):
             raise FileNotFoundError(source_path)
+        # Single-user: only one scene lives in memory at a time. Free the previous
+        # scene (full-res points + KD-tree + labels) BEFORE loading the new one,
+        # so repeated loads don't accumulate memory and peak stays ~1 scene.
+        with self._lock:
+            self._sessions.clear()
+        gc.collect()
         sid = uuid.uuid4().hex[:12]
         session = Session(sid, source_path)
         with self._lock:

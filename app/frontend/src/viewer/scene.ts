@@ -142,6 +142,30 @@ export class PointCloudScene {
     if (this.points) (this.points.material as THREE.ShaderMaterial).uniforms.size.value = s;
   }
 
+  /** Recompute the base (unlabeled) point colors from a per-point scalar field.
+   *  continuous fields (height/intensity) use the height ramp; categorical fields
+   *  (label ids) get a distinct color per value (0 = gray). Caller then recolors. */
+  setBaseColorField(values: Float32Array, categorical: boolean) {
+    if (!this.baseColor) return;
+    const n = Math.min(this.n, values.length);
+    const col = this.baseColor;
+    if (categorical) {
+      for (let i = 0; i < n; i++) {
+        const v = values[i];
+        const [r, g, b] = v === 0 ? [0.35, 0.35, 0.35] : catColor(v);
+        col[i * 3] = r; col[i * 3 + 1] = g; col[i * 3 + 2] = b;
+      }
+    } else {
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i < n; i++) { const v = values[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+      const rng = hi - lo || 1;
+      for (let i = 0; i < n; i++) {
+        const [r, g, b] = ramp((values[i] - lo) / rng);
+        col[i * 3] = r; col[i * 3 + 1] = g; col[i * 3 + 2] = b;
+      }
+    }
+  }
+
   orbitView() {
     const d = this.sceneSize * 0.7;
     this.activeCamera = this.camera;
@@ -207,6 +231,17 @@ export class PointCloudScene {
     return this.geom?.getAttribute("position").array as Float32Array | undefined;
   }
 
+  /** World-space radius corresponding to a screen pixel radius AT a given point's
+   *  depth (works for both perspective & ortho). Lets a pixel-sized brush drive a
+   *  true 3D ball query. */
+  pixelToWorldRadius(world: THREE.Vector3, pixelRadius: number): number {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = world.clone().project(this.activeCamera);
+    const dxNdc = (2 * pixelRadius) / Math.max(1, rect.width);
+    const edge = new THREE.Vector3(ndc.x + dxNdc, ndc.y, ndc.z).unproject(this.activeCamera);
+    return world.distanceTo(edge);
+  }
+
   /** Camera view-projection + viewport, for backend full-res screen selection. */
   getViewProj(): { view_proj: number[]; vw: number; vh: number } {
     this.activeCamera.updateMatrixWorld();
@@ -225,7 +260,8 @@ export class PointCloudScene {
     maskSet: Set<number> | null,
     hidden: Set<number>,
     instanceColors: Map<number, [number, number, number]>,
-    bgDim = 0.9
+    bgDim = 0.9,
+    hideMaskPoints = false
   ) {
     if (!this.colorAttr || !this.alphaAttr || !this.baseColor) return;
     const col = this.colorAttr.array as Float32Array;
@@ -234,7 +270,10 @@ export class PointCloudScene {
       const lab = labels[i];
       let r: number, g: number, b: number, a = 1;
       if (maskSet && maskSet.has(i)) {
-        [r, g, b] = HIGHLIGHT;
+        // hideMaskPoints: hide the current selection entirely (label + its raw
+        // points), so the selected tree disappears from view; else highlight it.
+        if (hideMaskPoints) { r = g = b = 0; a = 0; }
+        else { [r, g, b] = HIGHLIGHT; }
       } else if (lab > 0) {
         if (hidden.has(lab)) { a = 0; }
         const c = instanceColors.get(lab);
@@ -369,6 +408,18 @@ function pointInPolygon(x: number, y: number, poly: [number, number][]): boolean
     if (((yi > y) !== (yj > y)) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
   }
   return inside;
+}
+
+// distinct color per categorical value (golden-ratio hue), matching instance colors.
+function catColor(v: number): [number, number, number] {
+  return hsv((Math.abs(Math.round(v)) * 0.61803398875) % 1, 0.6, 0.95);
+}
+function hsv(h: number, s: number, v: number): [number, number, number] {
+  const i = Math.floor(h * 6);
+  const f = h * 6 - i;
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  const m = [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][i % 6];
+  return [m[0], m[1], m[2]];
 }
 
 // standard height ramp: blue(low) → cyan → green → yellow → red(high)

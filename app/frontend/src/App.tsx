@@ -10,7 +10,7 @@ import { api } from "./api/client";
 import { useT } from "./i18n";
 
 const KEYS: Record<string, Tool> = {
-  b: "bbox", p: "pos", n: "neg", l: "lasso", k: "brush", t: "orbit",
+  b: "bbox", p: "pos", n: "neg", k: "brush", l: "lasso", t: "orbit",
 };
 
 export default function App() {
@@ -31,7 +31,13 @@ export default function App() {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
       const st = useStore.getState();
       const k = e.key.toLowerCase();
-      if (k in KEYS) { st.setTool(KEYS[k]); }
+      if (e.ctrlKey || e.metaKey) {   // undo / redo
+        if (k === "z" && !e.shiftKey) { e.preventDefault(); annotator.undo(); }
+        else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); annotator.redo(); }
+        return;
+      }
+      if (k === "h") { st.toggleHideMask(); annotator.recolor(); }
+      else if (k in KEYS) { st.setTool(KEYS[k]); }
       else if (e.key === "Enter" && st.maskIndices.length > 0) st.setDialogOpen(true);
       else if (e.key === "Escape") annotator.clearWorking();
       else if (k === "t") annotator.scene?.topView();

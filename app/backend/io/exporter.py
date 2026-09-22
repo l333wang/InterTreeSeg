@@ -34,3 +34,28 @@ def export_attributes_csv(session) -> bytes:
         row["instance_id"] = inst.id
         writer.writerow(row)
     return out.getvalue().encode("utf-8")
+
+
+_EVAL_COLUMNS = [
+    "instance_id", "clicks", "time_s", "point_count",
+    "matched_gt", "gt_point_count", "iou",
+]
+
+
+def export_evaluation_csv(session) -> bytes:
+    """Per-tree evaluation (clicks / time / IoU vs GT) + a summary block.
+
+    Columns: instance_id, clicks, time_s, point_count, matched_gt,
+    gt_point_count, iou. A trailing '# summary' section lists the session totals.
+    """
+    ev = session.evaluation()
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=_EVAL_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for rec in ev["records"]:
+        writer.writerow(rec)
+    out.write("\n# summary\n")
+    for k, v in ev["summary"].items():
+        out.write(f"{k},{'' if v is None else v}\n")
+    out.write(f"source,{session.source_path}\n")
+    return out.getvalue().encode("utf-8")

@@ -28,8 +28,15 @@ PTV3_GRID_SIZE = float(os.environ.get("ANNO_PTV3_GRID", "0.02"))
 PTV3_NUM_POINT = int(os.environ.get("ANNO_PTV3_NUMPOINT", "8192"))
 PTV3_CLICK_SIGMA = float(os.environ.get("ANNO_PTV3_SIGMA", "0.01"))  # gaussian click width (world metres)
 
-# Column layout of the 6-column .txt point clouds: x y z feat gt_semantic gt_instance
-TXT_COLS = {"x": 0, "y": 1, "z": 2, "feat": 3, "gt_semantic": 4, "gt_instance": 5}
+# Column layout of the 6-column .txt point clouds: x y z feat treeID semanticCode
+TXT_COLS = {"x": 0, "y": 1, "z": 2, "feat": 3, "gt_instance": 4, "gt_semantic": 5}
+
+# Ground-truth instance-id column (0-based) used for IoU evaluation. In the
+# FOR/NIBIO test scenes the per-tree id (treeID) is column 4; column 5 is a
+# semantic class code, NOT an instance id. This matches the library's
+# configs/default.yaml `label_channel: 4`. Override for other layouts.
+GT_INSTANCE_COL = int(os.environ.get("ANNO_GT_INSTANCE_COL", "4"))
+GT_IGNORE_ID = int(os.environ.get("ANNO_GT_IGNORE_ID", "0"))  # 0 = ground / unlabeled
 
 # Default tree-species dropdown options (editable in the UI).
 DEFAULT_SPECIES = ["Unknown", "Pine", "Spruce", "Birch", "Oak", "Beech", "Larch"]
